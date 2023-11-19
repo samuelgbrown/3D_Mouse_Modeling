@@ -12,7 +12,7 @@
 %   y - left
 %   z - up
 %
-% Define b frame as that a palm-up hand would have when held in front of
+% Define b frame as that a palm-up hand would have when held in front ofM
 % you, with configuration affixed to the end of the second link
 %   x - pointing from wrist to elbow
 %   z - aligned along positive rotation axis of elbow
@@ -53,17 +53,18 @@
 %        [ L]
 %
 % Physical model:
-% component of dv along M-gate_plane line must be less than or equal to the length of the M-gate_plane line, unless f_external > f_gate
+% component of dv along M-gate_plane line must be less than or equal to the length of the M-gate_plane line, unless f_input > f_gate
 % 	M-gate_plane line: line from getLoc(M) perpendicular to the x-y plane of M_G
-% 	roughly, dv along line is: max(0, f_external - f_gate)
+% 	roughly, dv along line is: max(0, f_input - f_gate)
 %
 % (current trajectory places it at-or-below-gate)*min(-X, f_gate)
 % 	min = returns the vector with the minimum amplitude
-% 	X = M-gate_plane component of f_external
+% 	X = normal to M-gate_plane component of f_input
 %
-%   M_G_z = getUnitVec(M_G, 3)
-%   M_G_loc = getLoc(M_G)
-%   M_loc = getLoc(M)
+%   M_G = Configuration matrix representing gate plane
+%   M_G_z = getUnitVec(M_G, 3), normal unit vector to gate plane
+%   M_G_loc = getLoc(M_G), location of origin of gate plane
+%   M_loc = getLoc(M), location of actuator
 %   unit(v) = v./|v|
 %   distToPlaneAlongVec(loc, plane_frame, vec) = (dot(getUnitVec(plane_frame), loc) + getLoc(plane_frame))./unit(vec)
 %   minVec(a, b) = returns vector with smallest magnitude
@@ -72,17 +73,23 @@
 % Modes
 % Driven mode - Arm may move on its own to keep the actuator away from the
 % gate
-% dv = f_scale.*f_ext_s + (dot(M_G_z, M_loc) < 0).*(M_G_z.*f_g) + (abs(dot(M_G_z, M_loc)) < tol).*minVec(-1*f_ext_s along M_G_z, M_G_z.*f_g);
+% dv = f_scale *(f_input_s + (dot(M_G_z, M_loc) < 0).*(M_G_z.*f_g) + (abs(dot(M_G_z, M_loc)) < tol).*minVec(-1*f_input_s along M_G_z, M_G_z.*f_g))
+%              {input force}  {gate driving force if inside body}                         {resisting force if on boundary of body}
 %           Extra step in BOTH cases: if (dot(M_G_z, M_loc).*dot(M_G_z,
-%           M_loc_new) < 0) && (dot(M_G_z, M_loc) > dot(M_G_z, M_loc_new))
-%           (where M_loc_new = M_loc + dv.*dt), then must constrain
-%           dv_new.*dt = dp_new = dp.*(distToPlaneAlongVec(M_loc, M_G,
-%           dp)/|dp|)
+%           M_loc_new) < 0) {M_loc switches sides of boundary} &&
+%           (dot(M_G_z, M_loc) > dot(M_G_z, M_loc_new)) {M_loc currently
+%           inside body} (where M_loc_new = M_loc + dv.*dt), then must
+%           constrain dv_new.*dt = dp_new = dp.*(distToPlaneAlongVec(M_loc,
+%           M_G, dp)/|dp|) {stop M_loc on boundary at end of time step}
 %
 % Resistive mode - Arm will only resist motion to keep the actuator away
 % from the gate
-% dv = f_scale.*f_ext_s + (dot(M_G_z, M_loc) <= 0).*minVec(-1*f_ext_s along M_G_z, M_G_z.*f_g)
+% dv = f_scale *(f_input_s + (dot(M_G_z, M_loc) <= 0).*minVec(-1*f_input_s along M_G_z, M_G_z.*f_g))
+%              {input force}            {resisting force if inside / on boundary of body}
 %
+% ************************************************************************
+% NOTE: See end of file for some notes on robotics-related linear algebra!
+% ************************************************************************
 
 %% Trivial case of single axis
 % Assume that we have a single force acting on a 2-link arm
@@ -130,10 +137,10 @@ tol = 1e-3; % Tolerance for being "on" the boundary (only used in driven mode)
 f_scale = 50; % Input force scaling (lbs/(mm/s))
 
 % Define the input force as a piecewise constant function
-t_f_ext = [0 2.5 3 3.5  4  4.5 5];
-y_f_ext = [3 6 0  0   0   4  0];
-% f_ext_scalar = 2; % 4.17
-f_ext_s = @(t) interp1(t_f_ext, y_f_ext, t, 'previous')*[.5 -.2 .3]; % Force on actuator: Forward, slightly left and more slightly up
+t_f_in = [0 2.5 3 3.5  4  4.5 5];
+y_f_in = [3 6 0  0   0   4  0];
+% f_in_scalar = 2; % 4.17
+f_in_s = @(t) interp1(t_f_in, y_f_in, t, 'previous')*[.5 -.2 .3]; % Force on actuator: Forward, slightly left and more slightly up
 
 % Things that will change when a new gate is sent! (Can be computed on the
 % fly if we're SERIOUSLY memory lim...)
@@ -151,7 +158,7 @@ allDt(1) = 0;
 for tInd = 2:numT
     % Perform simulation-level calculations (NOT USED IN FINAL PROGRAM)
     t = tVec(tInd);
-    f_external_b = f_ext_s(t)*getRot(M); % Get the force in body-space
+    f_input_b = f_in_s(t)*getRot(M); % Get the force in body-space
     
     % Set some parameters
     outsideGate = false; % To track if we cross into the gate boundary in driven mode
@@ -161,12 +168,12 @@ for tInd = 2:numT
     % Can use simple method from Wikipedia
     
     % TODO: Based on the forces from the actuator load cells, calculate our
-    % external force f_external_b
+    % external force f_input_b
     % Each acuator just becomes one component
     
     % Perform some prior calculations
     thisDt = t - tLast; % Calculate the timestep
-    f_external_s = f_external_b*getRot(M)'; % Find the external force in the space frame by using the actuator's known frame
+    f_input_s = f_input_b*getRot(M)'; % Find the external force in the space frame by using the actuator's known frame
     M_Loc_prior = getLoc(M); % Get the location of the actuator frame
     M_Loc_prior_perp_bound = M_Loc_prior - M_G_loc; % A vector between the boundary plane and M_Loc_prior, that is perpendicular to the boundary
     boundDist_prior = dot(M_G_z, M_Loc_prior_perp_bound); % Find the distance to the boundary
@@ -181,8 +188,8 @@ for tInd = 2:numT
             % Note: Previously had a todo here that my external force was
             % incorrectly defined, but I think I fixed that...
             % We are "on" the gate boundary
-            f_external_opposing = -dot(M_G_z, f_external_s);
-            boundaryForce = min(norm(f_external_opposing), f_g); % Might technically not need the "abs", because f_external_opposing SHOULD always be positive...maybe...
+            f_input_opposing = -dot(M_G_z, f_input_s);
+            boundaryForce = min(norm(f_input_opposing), f_g); % Might technically not need the "abs", because f_input_opposing SHOULD always be positive...maybe...
         elseif boundDist_prior < 0
             % We are inside of the gated volume
             boundaryForce = f_g;
@@ -194,8 +201,8 @@ for tInd = 2:numT
     else
         % We are in resistive mode
         if boundDist_prior <= tol
-            f_external_opposing = -dot(M_G_z, f_external_s)*M_G_z;
-            boundaryForce = min(norm(f_external_opposing), f_g); % Might technically not need the "abs", because f_external_opposing SHOULD always be positive...maybe...
+            f_input_opposing = -dot(M_G_z, f_input_s)*M_G_z;
+            boundaryForce = min(norm(f_input_opposing), f_g); % Might technically not need the "abs", because f_input_opposing SHOULD always be positive...maybe...
         else
             boundaryForce = 0;
             outsideGate = true;
@@ -203,7 +210,7 @@ for tInd = 2:numT
     end
     
     % Add the boundary force to dv
-    dv = f_scale*(f_external_s + boundaryForce*M_G_z);
+    dv = f_scale*(f_input_s + boundaryForce*M_G_z);
     
     % Calculate the new location
     M_Loc_post = M_Loc_prior + dv*thisDt;
@@ -221,8 +228,8 @@ for tInd = 2:numT
         
         if boundDist_post < 0
             % We will be entering the boundary this frame.  Check the size of
-            % the projection of -f_external_s onto M_G_z to see what to do
-            if norm(-dot(M_G_z, f_external_s)) < f_g
+            % the projection of -f_input_s onto M_G_z to see what to do
+            if norm(-dot(M_G_z, f_input_s)) < f_g
                 % If the external force is less than the gate force, then
                 % we should not let the actuator through!
                 dp = dp*scaleFactor;
@@ -231,12 +238,12 @@ for tInd = 2:numT
                 % If the external force is greater than the gate force,
                 % calculate the final deflection as a function of the
                 % amount of time the actuator has spent in the boundary
-                dv = f_scale*(f_external_s + (1 - scaleFactor)*f_g*M_G_z);
+                dv = f_scale*(f_input_s + (1 - scaleFactor)*f_g*M_G_z);
                 dp = dv*thisDt;
             end
         else
             % We will be leaving the boundary this frame.  Check the size of
-            % the projection of -f_external_s onto M_G_z to see what to do
+            % the projection of -f_input_s onto M_G_z to see what to do
             
             % Place the actuator onto the boundary
             dp = dp*scaleFactor;
@@ -244,13 +251,13 @@ for tInd = 2:numT
             % Determine if the force is pointing away from the gate,
             % because it can't re-enter the gate, as it would not have left
             % if it could
-            forcePointingAway = dot(f_external_s, M_G_z) > 0;
+            forcePointingAway = dot(f_input_s, M_G_z) > 0;
             
             % If we need to take the remaining force into account...
             if forcePointingAway
                 % Add the force magnitude, scaled by the amount of time it
                 % is outside of the boundary
-                dp = dp + f_scale*(1 - scaleFactor)*f_external_s;
+                dp = dp + f_scale*(1 - scaleFactor)*f_input_s;
             end
             
             dv = dp/thisDt; % TODO: Not really needed, except for visualization
